@@ -104,4 +104,16 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+
+
+  // PagedOut Inc. demand paging fields
+  uint64 text_start, text_end; // Text segment boundaries
+  uint64 data_start, data_end; // Data segment boundaries  
+  uint64 heap_start;           // Heap start address
+  int next_fifo_seq;           // Next FIFO sequence number
+  struct inode *exec_inode;    // Executable file for loading pages
+
+  
+
 };

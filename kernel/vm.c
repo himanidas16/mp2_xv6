@@ -445,32 +445,32 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   }
 }
 
-// allocate and map user memory if process is referencing a page
-// that was lazily allocated in sys_sbrk().
-// returns 0 if va is invalid or already mapped, or if
-// out of physical memory, and physical address if successful.
-uint64
-vmfault(pagetable_t pagetable, uint64 va, int read)
-{
-  uint64 mem;
-  struct proc *p = myproc();
+// // allocate and map user memory if process is referencing a page
+// // that was lazily allocated in sys_sbrk().
+// // returns 0 if va is invalid or already mapped, or if
+// // out of physical memory, and physical address if successful.
+// uint64
+// vmfault(pagetable_t pagetable, uint64 va, int read)
+// {
+//   uint64 mem;
+//   struct proc *p = myproc();
 
-  if (va >= p->sz)
-    return 0;
-  va = PGROUNDDOWN(va);
-  if(ismapped(pagetable, va)) {
-    return 0;
-  }
-  mem = (uint64) kalloc();
-  if(mem == 0)
-    return 0;
-  memset((void *) mem, 0, PGSIZE);
-  if (mappages(p->pagetable, va, PGSIZE, mem, PTE_W|PTE_U|PTE_R) != 0) {
-    kfree((void *)mem);
-    return 0;
-  }
-  return mem;
-}
+//   if (va >= p->sz)
+//     return 0;
+//   va = PGROUNDDOWN(va);
+//   if(ismapped(pagetable, va)) {
+//     return 0;
+//   }
+//   mem = (uint64) kalloc();
+//   if(mem == 0)
+//     return 0;
+//   memset((void *) mem, 0, PGSIZE);
+//   if (mappages(p->pagetable, va, PGSIZE, mem, PTE_W|PTE_U|PTE_R) != 0) {
+//     kfree((void *)mem);
+//     return 0;
+//   }
+//   return mem;
+// }
 
 int
 ismapped(pagetable_t pagetable, uint64 va)
@@ -483,4 +483,131 @@ ismapped(pagetable_t pagetable, uint64 va)
     return 1;
   }
   return 0;
+}
+
+//changes 
+
+uint64
+vmfault(pagetable_t pagetable, uint64 va, int is_write)
+{
+  struct proc *p = myproc();
+  char *mem;
+  uint64 page_va = PGROUNDDOWN(va);
+  
+  printf("[DEBUG] vmfault: va=0x%lx, p->sz=0x%lx, stack_range=[0x%lx,0x%lx)\n", 
+         va, p->sz, p->sz - USERSTACK*PGSIZE, p->sz);
+  
+  // Check if address is valid - CHECK STACK FIRST
+  if(va >= p->sz - USERSTACK*PGSIZE && va < p->sz) {
+    // Stack - allocate zero-filled page  
+    printf("[pid %d] PAGEFAULT va=0x%lx access=%s cause=stack\n", 
+            p->pid, page_va, is_write ? "write" : "read");
+    
+    if((mem = kalloc()) == 0) {
+      printf("[pid %d] MEMFULL\n", p->pid);
+      return -1;
+    }
+    memset(mem, 0, PGSIZE);
+    
+    // Map the page
+    if(mappages(pagetable, page_va, PGSIZE, (uint64)mem, PTE_R | PTE_W | PTE_U) < 0) {
+      kfree(mem);
+      return -1;
+    }
+    
+    printf("[pid %d] ALLOC va=0x%lx\n", p->pid, page_va);
+    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq++);
+    
+    // Debug: verify stack mapping worked
+    uint64 pa_check_stack = walkaddr(pagetable, page_va);
+    printf("[DEBUG] After stack mapping: va=0x%lx -> pa=0x%lx\n", page_va, pa_check_stack);
+    
+    return 0;
+  }
+  else if(va >= p->text_start && va < p->text_end) {
+    // Text segment - allocate and load from executable
+    printf("[pid %d] PAGEFAULT va=0x%lx access=%s cause=exec\n", 
+            p->pid, page_va, is_write ? "write" : "read");
+    
+    if((mem = kalloc()) == 0) {
+      printf("[pid %d] MEMFULL\n", p->pid);
+      return -1;
+    }
+    memset(mem, 0, PGSIZE);
+    
+    // Map the page
+    if(mappages(pagetable, page_va, PGSIZE, (uint64)mem, PTE_R | PTE_X | PTE_U) < 0) {
+      kfree(mem);
+      return -1;
+    }
+    
+    printf("[pid %d] LOADEXEC va=0x%lx\n", p->pid, page_va);
+    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq++);
+    
+    // Debug: verify text mapping worked
+    uint64 pa_check_text = walkaddr(pagetable, page_va);
+    printf("[DEBUG] After text mapping: va=0x%lx -> pa=0x%lx\n", page_va, pa_check_text);
+    
+    return 0;
+  }
+  else if(va >= p->data_start && va < p->data_end) {
+    // Data segment - allocate and load from executable
+    printf("[pid %d] PAGEFAULT va=0x%lx access=%s cause=exec\n", 
+            p->pid, page_va, is_write ? "write" : "read");
+    
+    if((mem = kalloc()) == 0) {
+      printf("[pid %d] MEMFULL\n", p->pid);
+      return -1;
+    }
+    memset(mem, 0, PGSIZE);
+    
+    // Map the page
+    if(mappages(pagetable, page_va, PGSIZE, (uint64)mem, PTE_R | PTE_W | PTE_U) < 0) {
+      kfree(mem);
+      return -1;
+    }
+    
+    printf("[pid %d] LOADEXEC va=0x%lx\n", p->pid, page_va);
+    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq++);
+    
+    // Debug: verify data mapping worked
+    uint64 pa_check_data = walkaddr(pagetable, page_va);
+    printf("[DEBUG] After data mapping: va=0x%lx -> pa=0x%lx\n", page_va, pa_check_data);
+    
+    return 0;
+  }
+  else if(va >= p->heap_start && va < p->sz - USERSTACK*PGSIZE) {
+    // Heap - allocate zero-filled page
+    printf("[pid %d] PAGEFAULT va=0x%lx access=%s cause=heap\n", 
+            p->pid, page_va, is_write ? "write" : "read");
+    
+    if((mem = kalloc()) == 0) {
+      printf("[pid %d] MEMFULL\n", p->pid);
+      return -1;
+    }
+    memset(mem, 0, PGSIZE);
+    
+    // Map the page
+    if(mappages(pagetable, page_va, PGSIZE, (uint64)mem, PTE_R | PTE_W | PTE_U) < 0) {
+      kfree(mem);
+      return -1;
+    }
+    
+    printf("[pid %d] ALLOC va=0x%lx\n", p->pid, page_va);
+    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq++);
+    
+    // Debug: verify heap mapping worked
+    uint64 pa_check_heap = walkaddr(pagetable, page_va);
+    printf("[DEBUG] After heap mapping: va=0x%lx -> pa=0x%lx\n", page_va, pa_check_heap);
+    
+    return 0;
+  }
+  else {
+    // Invalid access - kill process
+    printf("[pid %d] PAGEFAULT va=0x%lx access=%s cause=invalid\n", 
+            p->pid, page_va, is_write ? "write" : "read");
+    printf("[pid %d] KILL invalid-access va=0x%lx access=%s\n", 
+            p->pid, page_va, is_write ? "write" : "read");
+    return -1;
+  }
 }

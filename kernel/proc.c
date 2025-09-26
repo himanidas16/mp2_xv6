@@ -146,6 +146,17 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // Initialize PagedOut fields
+  p->text_start = 0;
+  p->text_end = 0;
+  p->data_start = 0;
+  p->data_end = 0;
+  p->heap_start = 0;
+  p->next_fifo_seq = 0;
+  p->exec_inode = 0;
+
+  
+
   return p;
 }
 

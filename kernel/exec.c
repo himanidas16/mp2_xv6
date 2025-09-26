@@ -7,7 +7,7 @@
 #include "defs.h"
 #include "elf.h"
 
-static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
+// static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
 
 // map ELF permissions to PTE permission bits.
 int flags2perm(int flags)
@@ -55,7 +55,7 @@ kexec(char *path, char **argv)
   if((pagetable = proc_pagetable(p)) == 0)
     goto bad;
 
-  // Load program into memory.
+  // Setup lazy mapping - don't load pages yet
   for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
     if(readi(ip, 0, (uint64)&ph, off, sizeof(ph)) != sizeof(ph))
       goto bad;
@@ -67,13 +67,29 @@ kexec(char *path, char **argv)
       goto bad;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
-    uint64 sz1;
-    if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz, flags2perm(ph.flags))) == 0)
-      goto bad;
-    sz = sz1;
-    if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
-      goto bad;
+    
+    // Store segment boundaries for demand paging
+    if(i == 0) {  // First segment (typically text)
+      p->text_start = ph.vaddr;
+      p->text_end = ph.vaddr + ph.memsz;
+    } else {      // Second segment (typically data)
+      p->data_start = ph.vaddr;
+      p->data_end = ph.vaddr + ph.memsz;
+    }
+    
+    sz = ph.vaddr + ph.memsz;  // Update size but don't allocate
   }
+
+  // Log the lazy mapping setup
+  printf("[pid %d] INIT-LAZYMAP text=[0x%lx,0x%lx) data=[0x%lx,0x%lx) heap_start=0x%lx stack_top=0x%lx\n", 
+       p->pid, p->text_start, p->text_end, p->data_start, p->data_end, p->data_end, sz + (USERSTACK+1)*PGSIZE);
+  
+  // Set heap start  
+  p->heap_start = p->data_end;
+  
+  // Store executable inode for demand loading
+  p->exec_inode = ip;
+  idup(ip);  // Increment reference count
   iunlockput(ip);
   end_op();
   ip = 0;
@@ -86,14 +102,20 @@ kexec(char *path, char **argv)
   // Use the rest as the user stack.
   sz = PGROUNDUP(sz);
   uint64 sz1;
-  if((sz1 = uvmalloc(pagetable, sz, sz + (USERSTACK+1)*PGSIZE, PTE_W)) == 0)
-    goto bad;
+  
+  // Don't allocate stack pages yet - will be done on demand
+  sz1 = sz + (USERSTACK+1)*PGSIZE;
   sz = sz1;
-  uvmclear(pagetable, sz-(USERSTACK+1)*PGSIZE);
   sp = sz;
   stackbase = sp - USERSTACK*PGSIZE;
 
+
+   p->sz = sz;
+
+
   // Copy argument strings into new stack, remember their
+  // addresses in ustack[].
+// Copy argument strings into new stack, remember their
   // addresses in ustack[].
   for(argc = 0; argv[argc]; argc++) {
     if(argc >= MAXARG)
@@ -102,8 +124,12 @@ kexec(char *path, char **argv)
     sp -= sp % 16; // riscv sp must be 16-byte aligned
     if(sp < stackbase)
       goto bad;
-    if(copyout(pagetable, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
+    printf("[DEBUG] About to copyout to sp=0x%lx, len=%d\n", sp, strlen(argv[argc]) + 1);
+    if(copyout(pagetable, sp, argv[argc], strlen(argv[argc]) + 1) < 0) {
+      printf("[DEBUG] copyout FAILED\n");
       goto bad;
+    }
+    printf("[DEBUG] copyout SUCCESS\n");
     ustack[argc] = sp;
   }
   ustack[argc] = 0;
@@ -113,6 +139,7 @@ kexec(char *path, char **argv)
   sp -= sp % 16;
   if(sp < stackbase)
     goto bad;
+  printf("[DEBUG] copyout ustack to sp=0x%lx\n", sp);
   if(copyout(pagetable, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
     goto bad;
 
@@ -146,28 +173,27 @@ kexec(char *path, char **argv)
   }
   return -1;
 }
-
 // Load an ELF program segment into pagetable at virtual address va.
 // va must be page-aligned
 // and the pages from va to va+sz must already be mapped.
 // Returns 0 on success, -1 on failure.
-static int
-loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz)
-{
-  uint i, n;
-  uint64 pa;
+// static int
+// loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz)
+// {
+//   uint i, n;
+//   uint64 pa;
 
-  for(i = 0; i < sz; i += PGSIZE){
-    pa = walkaddr(pagetable, va + i);
-    if(pa == 0)
-      panic("loadseg: address should exist");
-    if(sz - i < PGSIZE)
-      n = sz - i;
-    else
-      n = PGSIZE;
-    if(readi(ip, 0, (uint64)pa, offset+i, n) != n)
-      return -1;
-  }
+//   for(i = 0; i < sz; i += PGSIZE){
+//     pa = walkaddr(pagetable, va + i);
+//     if(pa == 0)
+//       panic("loadseg: address should exist");
+//     if(sz - i < PGSIZE)
+//       n = sz - i;
+//     else
+//       n = PGSIZE;
+//     if(readi(ip, 0, (uint64)pa, offset+i, n) != n)
+//       return -1;
+//   }
   
-  return 0;
-}
+//   return 0;
+// }
