@@ -486,6 +486,63 @@ ismapped(pagetable_t pagetable, uint64 va)
 }
 
 //changes 
+// Add a page to the resident set
+void add_resident_page(struct proc *p, uint64 va, int seq) {
+  if(p->num_resident < MAX_RESIDENT_PAGES) {
+    p->resident_pages[p->num_resident].va = va;
+    p->resident_pages[p->num_resident].seq = seq;
+    p->resident_pages[p->num_resident].is_dirty = 0;  // Start as clean
+    p->num_resident++;
+  }
+}
+
+// Find and evict the oldest resident page using FIFO
+// Returns the physical address of the freed page
+char* evict_page_fifo(struct proc *p, pagetable_t pagetable) {
+  if(p->num_resident == 0)
+    return 0;
+  
+  // Find victim with lowest sequence number (oldest)
+  int victim_idx = 0;
+  int min_seq = p->resident_pages[0].seq;
+  
+  for(int i = 1; i < p->num_resident; i++) {
+    if(p->resident_pages[i].seq < min_seq) {
+      min_seq = p->resident_pages[i].seq;
+      victim_idx = i;
+    }
+  }
+  
+  uint64 victim_va = p->resident_pages[victim_idx].va;
+  int victim_seq = p->resident_pages[victim_idx].seq;
+  int is_dirty = p->resident_pages[victim_idx].is_dirty;
+  
+  // Log victim selection
+  printf("[pid %d] VICTIM va=0x%lx seq=%d algo=FIFO\n", p->pid, victim_va, victim_seq);
+  printf("[pid %d] EVICT va=0x%lx state=%s\n", p->pid, victim_va, is_dirty ? "dirty" : "clean");
+  
+  // Get physical address before unmapping
+  uint64 pa = walkaddr(pagetable, victim_va);
+  
+  // Unmap the page
+  uvmunmap(pagetable, victim_va, 1, 0);  // Don't free yet
+  
+  if(is_dirty) {
+    // TODO: Swap out dirty page (Part 3)
+    printf("[pid %d] SWAPOUT va=0x%lx slot=0\n", p->pid, victim_va);
+  } else {
+    printf("[pid %d] DISCARD va=0x%lx\n", p->pid, victim_va);
+  }
+  
+  // Remove from resident set by shifting array
+  for(int i = victim_idx; i < p->num_resident - 1; i++) {
+    p->resident_pages[i] = p->resident_pages[i + 1];
+  }
+  p->num_resident--;
+  
+  return (char*)pa;
+}
+
 
 uint64
 vmfault(pagetable_t pagetable, uint64 va, int is_write)
@@ -503,10 +560,13 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     printf("[pid %d] PAGEFAULT va=0x%lx access=%s cause=stack\n", 
             p->pid, page_va, is_write ? "write" : "read");
     
-    if((mem = kalloc()) == 0) {
-      printf("[pid %d] MEMFULL\n", p->pid);
-      return -1;
-    }
+   if((mem = kalloc()) == 0) {
+  printf("[pid %d] MEMFULL\n", p->pid);
+  mem = evict_page_fifo(p, pagetable);
+  if(mem == 0) {
+    return -1;
+  }
+}
     memset(mem, 0, PGSIZE);
     
     // Map the page
@@ -516,8 +576,18 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     }
     
     printf("[pid %d] ALLOC va=0x%lx\n", p->pid, page_va);
-    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq++);
+    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq);
+    add_resident_page(p, page_va, p->next_fifo_seq);
+    p->next_fifo_seq++;
     
+    // Add wraparound handling here
+if(p->next_fifo_seq >= 1000000) {
+  for(int i = 0; i < p->num_resident; i++) {
+    p->resident_pages[i].seq = i;
+  }
+  p->next_fifo_seq = p->num_resident;
+}
+
     return (uint64)mem;
   }
   else if(va >= p->text_start && va < p->text_end) {
@@ -525,10 +595,13 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     printf("[pid %d] PAGEFAULT va=0x%lx access=%s cause=exec\n", 
             p->pid, page_va, is_write ? "write" : "read");
     
-    if((mem = kalloc()) == 0) {
-      printf("[pid %d] MEMFULL\n", p->pid);
-      return -1;
-    }
+  if((mem = kalloc()) == 0) {
+  printf("[pid %d] MEMFULL\n", p->pid);
+  mem = evict_page_fifo(p, pagetable);
+  if(mem == 0) {
+    return -1;
+  }
+}
     memset(mem, 0, PGSIZE);  // Zero-fill first
     
     // Load actual program content from executable file
@@ -555,8 +628,16 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     }
     
     printf("[pid %d] LOADEXEC va=0x%lx\n", p->pid, page_va);
-    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq++);
-    
+    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq);
+    add_resident_page(p, page_va, p->next_fifo_seq);
+    p->next_fifo_seq++;
+    // Add wraparound handling here
+if(p->next_fifo_seq >= 1000000) {
+  for(int i = 0; i < p->num_resident; i++) {
+    p->resident_pages[i].seq = i;
+  }
+  p->next_fifo_seq = p->num_resident;
+}
     return (uint64)mem;
   }
   else if(va >= p->data_start && va < p->data_end) {
@@ -564,10 +645,13 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     printf("[pid %d] PAGEFAULT va=0x%lx access=%s cause=exec\n", 
             p->pid, page_va, is_write ? "write" : "read");
     
-    if((mem = kalloc()) == 0) {
-      printf("[pid %d] MEMFULL\n", p->pid);
-      return -1;
-    }
+  if((mem = kalloc()) == 0) {
+  printf("[pid %d] MEMFULL\n", p->pid);
+  mem = evict_page_fifo(p, pagetable);
+  if(mem == 0) {
+    return -1;
+  }
+}
     memset(mem, 0, PGSIZE);  // Zero-fill first
     
     // Load actual program content from executable file
@@ -594,8 +678,16 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     }
     
     printf("[pid %d] LOADEXEC va=0x%lx\n", p->pid, page_va);
-    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq++);
-    
+    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq);
+    add_resident_page(p, page_va, p->next_fifo_seq);
+    p->next_fifo_seq++;
+    // Add wraparound handling here
+if(p->next_fifo_seq >= 1000000) {
+  for(int i = 0; i < p->num_resident; i++) {
+    p->resident_pages[i].seq = i;
+  }
+  p->next_fifo_seq = p->num_resident;
+}
     return (uint64)mem;
   }
   else if(va >= p->heap_start && va < p->sz - USERSTACK*PGSIZE) {
@@ -603,10 +695,13 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     printf("[pid %d] PAGEFAULT va=0x%lx access=%s cause=heap\n", 
             p->pid, page_va, is_write ? "write" : "read");
     
-    if((mem = kalloc()) == 0) {
-      printf("[pid %d] MEMFULL\n", p->pid);
-      return -1;
-    }
+if((mem = kalloc()) == 0) {
+  printf("[pid %d] MEMFULL\n", p->pid);
+  mem = evict_page_fifo(p, pagetable);
+  if(mem == 0) {
+    return -1;
+  }
+}
     memset(mem, 0, PGSIZE);
     
     // Map the page
@@ -616,8 +711,16 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     }
     
     printf("[pid %d] ALLOC va=0x%lx\n", p->pid, page_va);
-    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq++);
-    
+    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq);
+    add_resident_page(p, page_va, p->next_fifo_seq);
+    p->next_fifo_seq++;
+    // Add wraparound handling here
+if(p->next_fifo_seq >= 1000000) {
+  for(int i = 0; i < p->num_resident; i++) {
+    p->resident_pages[i].seq = i;
+  }
+  p->next_fifo_seq = p->num_resident;
+}
     return (uint64)mem;
   }
   else {
