@@ -518,11 +518,7 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     printf("[pid %d] ALLOC va=0x%lx\n", p->pid, page_va);
     printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq++);
     
-    // Debug: verify stack mapping worked
-    uint64 pa_check_stack = walkaddr(pagetable, page_va);
-    printf("[DEBUG] After stack mapping: va=0x%lx -> pa=0x%lx\n", page_va, pa_check_stack);
-    
-    return 0;
+    return (uint64)mem;
   }
   else if(va >= p->text_start && va < p->text_end) {
     // Text segment - allocate and load from executable
@@ -533,7 +529,24 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
       printf("[pid %d] MEMFULL\n", p->pid);
       return -1;
     }
-    memset(mem, 0, PGSIZE);
+    memset(mem, 0, PGSIZE);  // Zero-fill first
+    
+    // Load actual program content from executable file
+    if(p->exec_inode && p->text_file_size > 0) {
+      uint64 page_offset_in_segment = page_va - p->text_start;
+      uint64 file_offset = p->text_file_offset + page_offset_in_segment;
+      uint64 bytes_to_read = PGSIZE;
+      
+      // Don't read beyond the segment
+      if(page_offset_in_segment + PGSIZE > p->text_file_size) {
+        bytes_to_read = p->text_file_size - page_offset_in_segment;
+      }
+      
+      // Read from executable file into the page
+      ilock(p->exec_inode);
+      readi(p->exec_inode, 0, (uint64)mem, file_offset, bytes_to_read);
+      iunlock(p->exec_inode);
+    }
     
     // Map the page
     if(mappages(pagetable, page_va, PGSIZE, (uint64)mem, PTE_R | PTE_X | PTE_U) < 0) {
@@ -544,11 +557,7 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     printf("[pid %d] LOADEXEC va=0x%lx\n", p->pid, page_va);
     printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq++);
     
-    // Debug: verify text mapping worked
-    uint64 pa_check_text = walkaddr(pagetable, page_va);
-    printf("[DEBUG] After text mapping: va=0x%lx -> pa=0x%lx\n", page_va, pa_check_text);
-    
-    return 0;
+    return (uint64)mem;
   }
   else if(va >= p->data_start && va < p->data_end) {
     // Data segment - allocate and load from executable
@@ -559,7 +568,24 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
       printf("[pid %d] MEMFULL\n", p->pid);
       return -1;
     }
-    memset(mem, 0, PGSIZE);
+    memset(mem, 0, PGSIZE);  // Zero-fill first
+    
+    // Load actual program content from executable file
+    if(p->exec_inode && p->data_file_size > 0) {
+      uint64 page_offset_in_segment = page_va - p->data_start;
+      uint64 file_offset = p->data_file_offset + page_offset_in_segment;
+      uint64 bytes_to_read = PGSIZE;
+      
+      // Don't read beyond the segment
+      if(page_offset_in_segment + PGSIZE > p->data_file_size) {
+        bytes_to_read = p->data_file_size - page_offset_in_segment;
+      }
+      
+      // Read from executable file into the page
+      ilock(p->exec_inode);
+      readi(p->exec_inode, 0, (uint64)mem, file_offset, bytes_to_read);
+      iunlock(p->exec_inode);
+    }
     
     // Map the page
     if(mappages(pagetable, page_va, PGSIZE, (uint64)mem, PTE_R | PTE_W | PTE_U) < 0) {
@@ -570,11 +596,7 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     printf("[pid %d] LOADEXEC va=0x%lx\n", p->pid, page_va);
     printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq++);
     
-    // Debug: verify data mapping worked
-    uint64 pa_check_data = walkaddr(pagetable, page_va);
-    printf("[DEBUG] After data mapping: va=0x%lx -> pa=0x%lx\n", page_va, pa_check_data);
-    
-    return 0;
+    return (uint64)mem;
   }
   else if(va >= p->heap_start && va < p->sz - USERSTACK*PGSIZE) {
     // Heap - allocate zero-filled page
@@ -596,11 +618,7 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     printf("[pid %d] ALLOC va=0x%lx\n", p->pid, page_va);
     printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq++);
     
-    // Debug: verify heap mapping worked
-    uint64 pa_check_heap = walkaddr(pagetable, page_va);
-    printf("[DEBUG] After heap mapping: va=0x%lx -> pa=0x%lx\n", page_va, pa_check_heap);
-    
-    return 0;
+    return (uint64)mem;
   }
   else {
     // Invalid access - kill process

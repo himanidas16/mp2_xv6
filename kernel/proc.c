@@ -155,7 +155,10 @@ found:
   p->next_fifo_seq = 0;
   p->exec_inode = 0;
 
-  
+  p->text_file_offset = 0;
+p->text_file_size = 0;
+p->data_file_offset = 0;
+p->data_file_size = 0;
 
   return p;
 }

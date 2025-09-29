@@ -69,13 +69,18 @@ kexec(char *path, char **argv)
       goto bad;
     
     // Store segment boundaries for demand paging
-    if(i == 0) {  // First segment (typically text)
-      p->text_start = ph.vaddr;
-      p->text_end = ph.vaddr + ph.memsz;
-    } else {      // Second segment (typically data)
-      p->data_start = ph.vaddr;
-      p->data_end = ph.vaddr + ph.memsz;
-    }
+// Store segment boundaries for demand paging
+if(i == 0) {  // First segment (typically text)
+  p->text_start = ph.vaddr;
+  p->text_end = ph.vaddr + ph.memsz;
+  p->text_file_offset = ph.off;
+  p->text_file_size = ph.filesz;
+} else {      // Second segment (typically data)
+  p->data_start = ph.vaddr;
+  p->data_end = ph.vaddr + ph.memsz;
+  p->data_file_offset = ph.off;
+  p->data_file_size = ph.filesz;
+}
     
     sz = ph.vaddr + ph.memsz;  // Update size but don't allocate
   }

@@ -116,4 +116,9 @@ struct proc {
 
   
 
+// Add these NEW fields:
+uint64 text_file_offset;     // Where text starts in the file
+uint64 text_file_size;       // How much text to read
+uint64 data_file_offset;     // Where data starts in the file  
+uint64 data_file_size;       // How much data to read
 };
