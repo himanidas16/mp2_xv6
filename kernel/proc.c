@@ -6,6 +6,14 @@
 #include "proc.h"
 #include "defs.h"
 
+
+// ##llm generated code - START
+#include "sleeplock.h"    // ADD THIS - needed for file operations
+#include "fs.h"           // ADD THIS - defines struct inode
+#include "file.h"         // ADD THIS - defines fileclose()
+// ##llm generated code - END
+
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -29,6 +37,9 @@ struct spinlock wait_lock;
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
 // guard page.
+// Helper function to format swap filename
+// Converts number to string with leading zeros
+
 void
 proc_mapstacks(pagetable_t kpgtbl)
 {
@@ -146,7 +157,8 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
-  // Initialize PagedOut fields
+  // ##llm generated code starts here
+  // Initialize demand paging fields (YOU SHOULD ALREADY HAVE THIS)
   p->text_start = 0;
   p->text_end = 0;
   p->data_start = 0;
@@ -154,14 +166,39 @@ found:
   p->heap_start = 0;
   p->next_fifo_seq = 0;
   p->exec_inode = 0;
+  p->num_resident = 0;
+  
+  // Initialize resident pages array
+  // Initialize resident pages array
+for(int i = 0; i < MAX_RESIDENT_PAGES; i++) {
+    p->resident_pages[i].va = 0;
+    p->resident_pages[i].seq = -1;
+    p->resident_pages[i].is_dirty = 0;
+    p->resident_pages[i].swap_slot = -1;
+    p->resident_pages[i].last_used_seq = -1;  // ADD THIS LINE
+}
 
-  p->text_file_offset = 0;
-p->text_file_size = 0;
-p->data_file_offset = 0;
-p->data_file_size = 0;
 
+  // NEW - INITIALIZE SWAPPED PAGES TRACKING
+  for(int i = 0; i < MAX_RESIDENT_PAGES; i++) {
+    p->swapped_pages[i].va = 0;
+    p->swapped_pages[i].swap_slot = -1;
+  }
+  p->num_swapped = 0;
+
+  
+  // NEW - SWAP INITIALIZATION (ADD THIS ENTIRE BLOCK)
+  p->swapfile = 0;                    // No swap file yet
+  p->swap_filename[0] = '\0';         // Empty filename
+  p->num_swap_slots_used = 0;         // No slots used yet
+  for(int i = 0; i < 1024; i++) {
+    p->swap_slots[i] = 0;             // Mark all slots as free
+  }
+
+  // ##llm generated code ends here
   return p;
 }
+
 
 // free a proc structure and the data hanging from it,
 // including user pages.
@@ -172,9 +209,21 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  
+  // ##llm generated code starts here
+  // Close exec inode
+  if(p->exec_inode) {
+    iput(p->exec_inode);
+    p->exec_inode = 0;
+  }
+  //llm generated code ends here
+  
+  // Don't close swapfile here - it will be closed in kexit()
+  
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -184,7 +233,6 @@ freeproc(struct proc *p)
   p->xstate = 0;
   p->state = UNUSED;
 }
-
 // Create a user page table for a given process, with no user memory,
 // but with trampoline and trapframe pages.
 pagetable_t
@@ -342,7 +390,16 @@ kexit(int status)
   if(p == initproc)
     panic("init exiting");
 
-  // Close all open files.
+
+    //llm generated code starts here
+  // NEW - SWAP CLEANUP (ADD THIS)
+  if(p->swapfile) {
+    printf("[pid %d] SWAPCLEANUP freed_slots=%d\n", p->pid, p->num_swap_slots_used);
+    // File will be closed in the loop below
+    p->num_swap_slots_used = 0;
+  }
+
+  // Close all open files. (EXISTING CODE)
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){
       struct file *f = p->ofile[fd];
@@ -350,7 +407,16 @@ kexit(int status)
       p->ofile[fd] = 0;
     }
   }
+  
+  // Close swap file explicitly (ADD THIS)
+  if(p->swapfile) {
+    fileclose(p->swapfile);
+    p->swapfile = 0;
+  }
 
+  //llm generated code ends here
+
+  
   begin_op();
   iput(p->cwd);
   end_op();
@@ -375,7 +441,6 @@ kexit(int status)
   sched();
   panic("zombie exit");
 }
-
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
 int

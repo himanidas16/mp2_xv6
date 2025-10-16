@@ -55,6 +55,11 @@ int             writei(struct inode*, int, uint64, uint, uint);
 void            itrunc(struct inode*);
 void            ireclaim(int);
 
+/////LLM generated code starts here 
+// sysfile.c (ADD THIS NEW SECTION)
+struct inode*   create(char*, short, short, short);
+///llm generated code ends here
+
 // kalloc.c
 void*           kalloc(void);
 void            kfree(void *);
@@ -167,8 +172,12 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
+
+//llm generated code starts here 
 int             ismapped(pagetable_t, uint64);
 uint64          vmfault(pagetable_t, uint64, int);
+//llm generated code ends here
+
 
 // plic.c
 void            plicinit(void);

@@ -3,12 +3,17 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 #include "proc.h"
 #include "defs.h"
 #include "elf.h"
+#include "stat.h"         // ADD THIS - defines T_FILE
 
 // static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
 
+//llm generated code starts here
 // map ELF permissions to PTE permission bits.
 int flags2perm(int flags)
 {
@@ -19,7 +24,7 @@ int flags2perm(int flags)
       perm |= PTE_W;
     return perm;
 }
-
+//llm generated code ends here
 //
 // the implementation of the exec() system call
 //
@@ -55,6 +60,8 @@ kexec(char *path, char **argv)
   if((pagetable = proc_pagetable(p)) == 0)
     goto bad;
 
+    //llm generated code starts here
+
   // Setup lazy mapping - don't load pages yet
   for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
     if(readi(ip, 0, (uint64)&ph, off, sizeof(ph)) != sizeof(ph))
@@ -85,6 +92,9 @@ if(i == 0) {  // First segment (typically text)
     sz = ph.vaddr + ph.memsz;  // Update size but don't allocate
   }
 
+ 
+
+
   // Log the lazy mapping setup
   printf("[pid %d] INIT-LAZYMAP text=[0x%lx,0x%lx) data=[0x%lx,0x%lx) heap_start=0x%lx stack_top=0x%lx\n", 
        p->pid, p->text_start, p->text_end, p->data_start, p->data_end, p->data_end, sz + (USERSTACK+1)*PGSIZE);
@@ -92,6 +102,50 @@ if(i == 0) {  // First segment (typically text)
   // Set heap start  
   p->heap_start = p->data_end;
   
+
+  // NEW - CREATE SWAP FILE (ADD THIS ENTIRE BLOCK)
+  // Format swap filename manually: /pgswp00003 (for pid 3)
+  p->swap_filename[0] = '/';
+  p->swap_filename[1] = 'p';
+  p->swap_filename[2] = 'g';
+  p->swap_filename[3] = 's';
+  p->swap_filename[4] = 'w';
+  p->swap_filename[5] = 'p';
+  
+  // Convert PID to 5-digit string with leading zeros
+  int pid_copy = p->pid;
+  for(int i = 10; i >= 6; i--) {
+    p->swap_filename[i] = '0' + (pid_copy % 10);
+    pid_copy = pid_copy / 10;
+  }
+  p->swap_filename[11] = '\0';  // Null terminator
+  
+  // Create the swap file
+  begin_op();
+  struct inode *swap_ip = create(p->swap_filename, T_FILE, 0, 0);
+  if(swap_ip == 0) {
+    end_op();
+    printf("[pid %d] ERROR: failed to create swap file %s\n", 
+            p->pid, p->swap_filename);
+  } else {
+    // Open file for reading/writing
+    p->swapfile = filealloc();
+    if(p->swapfile == 0) {
+      iunlockput(swap_ip);
+      end_op();
+      printf("[pid %d] ERROR: failed to allocate file\n", p->pid);
+    } else {
+      p->swapfile->type = FD_INODE;
+      p->swapfile->ip = swap_ip;
+      p->swapfile->off = 0;
+      p->swapfile->readable = 1;
+      p->swapfile->writable = 1;
+      iunlock(swap_ip);
+      end_op();
+    }
+  }
+
+
   // Store executable inode for demand loading
   p->exec_inode = ip;
   idup(ip);  // Increment reference count
@@ -116,7 +170,12 @@ if(i == 0) {  // First segment (typically text)
 
 
    p->sz = sz;
+ //llm generated code ends here
 
+
+
+
+ 
 
   // Copy argument strings into new stack, remember their
   // addresses in ustack[].
@@ -129,12 +188,12 @@ if(i == 0) {  // First segment (typically text)
     sp -= sp % 16; // riscv sp must be 16-byte aligned
     if(sp < stackbase)
       goto bad;
-    printf("[DEBUG] About to copyout to sp=0x%lx, len=%d\n", sp, strlen(argv[argc]) + 1);
+    // printf("[DEBUG] About to copyout to sp=0x%lx, len=%d\n", sp, strlen(argv[argc]) + 1);
     if(copyout(pagetable, sp, argv[argc], strlen(argv[argc]) + 1) < 0) {
-      printf("[DEBUG] copyout FAILED\n");
+      // printf("[DEBUG] copyout FAILED\n");
       goto bad;
     }
-    printf("[DEBUG] copyout SUCCESS\n");
+    // printf("[DEBUG] copyout SUCCESS\n");
     ustack[argc] = sp;
   }
   ustack[argc] = 0;
@@ -144,7 +203,7 @@ if(i == 0) {  // First segment (typically text)
   sp -= sp % 16;
   if(sp < stackbase)
     goto bad;
-  printf("[DEBUG] copyout ustack to sp=0x%lx\n", sp);
+  // printf("[DEBUG] copyout ustack to sp=0x%lx\n", sp);
   if(copyout(pagetable, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
     goto bad;
 

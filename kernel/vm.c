@@ -8,6 +8,8 @@
 #include "proc.h"
 #include "fs.h"
 
+#include "sleeplock.h"   
+#include "file.h"        
 /*
  * the kernel's page table.
  */
@@ -16,6 +18,8 @@ pagetable_t kernel_pagetable;
 extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
+int handle_write_fault(pagetable_t, uint64);//llm generated 
+
 
 // Make a direct-map page table for the kernel.
 pagetable_t
@@ -339,6 +343,8 @@ uvmclear(pagetable_t pagetable, uint64 va)
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
+
+/* ############## LLM Generated Code Begins ############## */
 int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
@@ -358,9 +364,21 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     }
 
     pte = walk(pagetable, va0, 0);
-    // forbid copyout over read-only user text pages.
-    if((*pte & PTE_W) == 0)
-      return -1;
+    
+    // If page is read-only but should be writable (user page), handle write fault
+    if((*pte & PTE_W) == 0) {
+      if((*pte & PTE_U) != 0) {
+        // User page that's read-only - try to upgrade it
+        if(handle_write_fault(pagetable, va0) < 0) {
+          return -1;  // Can't write to this page
+        }
+        // Refresh pte after potential upgrade
+        pte = walk(pagetable, va0, 0);
+      } else {
+        // Kernel page or text page - truly read-only
+        return -1;
+      }
+    }
       
     n = PGSIZE - (dstva - va0);
     if(n > len)
@@ -373,6 +391,8 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   }
   return 0;
 }
+
+
 
 // Copy from user to kernel.
 // Copy len bytes to dst from virtual address srcva in a given page table.
@@ -401,6 +421,8 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
   }
   return 0;
 }
+/* ############## LLM Generated Code Ends ################ */
+
 
 // Copy a null-terminated string from user to kernel.
 // Copy bytes to dst from virtual address srcva in a given page table,
@@ -472,6 +494,7 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 //   return mem;
 // }
 
+/* ############## LLM Generated Code Ends ################ */
 int
 ismapped(pagetable_t pagetable, uint64 va)
 {
@@ -485,13 +508,16 @@ ismapped(pagetable_t pagetable, uint64 va)
   return 0;
 }
 
+
+
 //changes 
 // Add a page to the resident set
 void add_resident_page(struct proc *p, uint64 va, int seq) {
   if(p->num_resident < MAX_RESIDENT_PAGES) {
     p->resident_pages[p->num_resident].va = va;
     p->resident_pages[p->num_resident].seq = seq;
-    p->resident_pages[p->num_resident].is_dirty = 0;  // Start as clean
+    p->resident_pages[p->num_resident].is_dirty = 0;
+    p->resident_pages[p->num_resident].last_used_seq = seq;  // ADD THIS LINE
     p->num_resident++;
   }
 }
@@ -524,15 +550,56 @@ char* evict_page_fifo(struct proc *p, pagetable_t pagetable) {
   // Get physical address before unmapping
   uint64 pa = walkaddr(pagetable, victim_va);
   
-  // Unmap the page
-  uvmunmap(pagetable, victim_va, 1, 0);  // Don't free yet
-  
   if(is_dirty) {
-    // TODO: Swap out dirty page (Part 3)
-    printf("[pid %d] SWAPOUT va=0x%lx slot=0\n", p->pid, victim_va);
+    // DIRTY PAGE - Write to swap file
+    
+    // Find a free swap slot
+    int slot = -1;
+    for(int i = 0; i < 1024; i++) {
+      if(p->swap_slots[i] == 0) {
+        slot = i;
+        break;
+      }
+    }
+    
+    if(slot == -1) {
+      printf("[pid %d] SWAPFULL\n", p->pid);
+      printf("[pid %d] KILL swap-exhausted\n", p->pid);
+      setkilled(p);
+      return 0;
+    }
+    
+    if(p->swapfile) {
+      p->swapfile->off = slot * PGSIZE;
+      int written = filewrite(p->swapfile, pa, PGSIZE);
+      if(written != PGSIZE) {
+        printf("[pid %d] ERROR: swap write failed\n", p->pid);
+        setkilled(p);
+        return 0;
+      }
+      
+      p->swap_slots[slot] = 1;
+      p->num_swap_slots_used++;
+      
+      // NEW - ADD SWAPPED PAGE TO TRACKING LIST
+      if(p->num_swapped < MAX_RESIDENT_PAGES) {
+        p->swapped_pages[p->num_swapped].va = victim_va;
+        p->swapped_pages[p->num_swapped].swap_slot = slot;
+        p->num_swapped++;
+      }
+      
+      printf("[pid %d] SWAPOUT va=0x%lx slot=%d\n", p->pid, victim_va, slot);
+    } else {
+      printf("[pid %d] ERROR: no swap file\n", p->pid);
+      setkilled(p);
+      return 0;
+    }
   } else {
     printf("[pid %d] DISCARD va=0x%lx\n", p->pid, victim_va);
   }
+  
+  // Unmap the page
+  uvmunmap(pagetable, victim_va, 1, 0);  // Don't free yet
   
   // Remove from resident set by shifting array
   for(int i = victim_idx; i < p->num_resident - 1; i++) {
@@ -541,6 +608,140 @@ char* evict_page_fifo(struct proc *p, pagetable_t pagetable) {
   p->num_resident--;
   
   return (char*)pa;
+}
+// LRU-based page replacement
+char* evict_page_lru(struct proc *p, pagetable_t pagetable) {
+  if(p->num_resident == 0)
+    return 0;
+  
+  // Find victim with lowest last_used_seq (least recently used)
+  int victim_idx = 0;
+  int min_last_used = p->resident_pages[0].last_used_seq;
+  
+  for(int i = 1; i < p->num_resident; i++) {
+    if(p->resident_pages[i].last_used_seq < min_last_used) {
+      min_last_used = p->resident_pages[i].last_used_seq;
+      victim_idx = i;
+    }
+  }
+  
+  uint64 victim_va = p->resident_pages[victim_idx].va;
+  int victim_seq = p->resident_pages[victim_idx].seq;
+  int is_dirty = p->resident_pages[victim_idx].is_dirty;
+  
+  // Log victim selection with algo=LRU
+  printf("[pid %d] VICTIM va=0x%lx seq=%d algo=LRU\n", p->pid, victim_va, victim_seq);
+  printf("[pid %d] EVICT va=0x%lx state=%s\n", p->pid, victim_va, is_dirty ? "dirty" : "clean");
+  
+  uint64 pa = walkaddr(pagetable, victim_va);
+  
+  if(is_dirty) {
+    // DIRTY PAGE - Write to swap file
+    int slot = -1;
+    for(int i = 0; i < 1024; i++) {
+      if(p->swap_slots[i] == 0) {
+        slot = i;
+        break;
+      }
+    }
+    
+    if(slot == -1) {
+      printf("[pid %d] SWAPFULL\n", p->pid);
+      printf("[pid %d] KILL swap-exhausted\n", p->pid);
+      setkilled(p);
+      return 0;
+    }
+    
+    if(p->swapfile) {
+      p->swapfile->off = slot * PGSIZE;
+      int written = filewrite(p->swapfile, pa, PGSIZE);
+      if(written != PGSIZE) {
+        printf("[pid %d] ERROR: swap write failed\n", p->pid);
+        setkilled(p);
+        return 0;
+      }
+      
+      p->swap_slots[slot] = 1;
+      p->num_swap_slots_used++;
+      
+      if(p->num_swapped < MAX_RESIDENT_PAGES) {
+        p->swapped_pages[p->num_swapped].va = victim_va;
+        p->swapped_pages[p->num_swapped].swap_slot = slot;
+        p->num_swapped++;
+      }
+      
+      printf("[pid %d] SWAPOUT va=0x%lx slot=%d\n", p->pid, victim_va, slot);
+    } else {
+      printf("[pid %d] ERROR: no swap file\n", p->pid);
+      setkilled(p);
+      return 0;
+    }
+  } else {
+    // CLEAN PAGE - Just discard
+    printf("[pid %d] DISCARD va=0x%lx\n", p->pid, victim_va);
+  }
+  
+  uvmunmap(pagetable, victim_va, 1, 0);
+  
+  for(int i = victim_idx; i < p->num_resident - 1; i++) {
+    p->resident_pages[i] = p->resident_pages[i + 1];
+  }
+  p->num_resident--;
+  
+  return (char*)pa;
+}
+// Check if a virtual address has been swapped out
+// Returns swap slot number if found, -1 if not swapped
+int find_swapped_page(struct proc *p, uint64 va) {
+  uint64 page_va = PGROUNDDOWN(va);
+  for(int i = 0; i < p->num_swapped; i++) {
+    if(p->swapped_pages[i].va == page_va) {
+      return p->swapped_pages[i].swap_slot;
+    }
+  }
+  return -1;
+}
+
+// Remove a page from the swapped list
+void remove_swapped_page(struct proc *p, uint64 va) {
+  uint64 page_va = PGROUNDDOWN(va);
+  for(int i = 0; i < p->num_swapped; i++) {
+    if(p->swapped_pages[i].va == page_va) {
+      // Shift remaining entries
+      for(int j = i; j < p->num_swapped - 1; j++) {
+        p->swapped_pages[j] = p->swapped_pages[j + 1];
+      }
+      p->num_swapped--;
+      return;
+    }
+  }
+}
+// Handle write to read-only page (mark dirty and upgrade permissions)
+int handle_write_fault(pagetable_t pagetable, uint64 va) {
+  struct proc *p = myproc();
+  uint64 page_va = PGROUNDDOWN(va);
+  
+  pte_t *pte = walk(pagetable, page_va, 0);
+  if(pte == 0 || (*pte & PTE_V) == 0) {
+    return -1;
+  }
+  
+  if((*pte & PTE_W) == 0 && (*pte & PTE_U) != 0) {
+    // Mark it dirty in our resident set
+    for(int i = 0; i < p->num_resident; i++) {
+      if(p->resident_pages[i].va == page_va) {
+        p->resident_pages[i].is_dirty = 1;
+        p->resident_pages[i].last_used_seq = p->next_fifo_seq;  // ADD THIS LINE
+        p->next_fifo_seq++;  // ADD THIS LINE
+        break;
+      }
+    }
+    
+    *pte |= PTE_W;
+    return 0;
+  }
+  
+  return -1;
 }
 
 
@@ -551,8 +752,73 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
   char *mem;
   uint64 page_va = PGROUNDDOWN(va);
   
-  printf("[DEBUG] vmfault: va=0x%lx, p->sz=0x%lx, stack_range=[0x%lx,0x%lx)\n", 
-         va, p->sz, p->sz - USERSTACK*PGSIZE, p->sz);
+  // printf("[DEBUG] vmfault: va=0x%lx, p->sz=0x%lx, stack_range=[0x%lx,0x%lx)\n", 
+  //        va, p->sz, p->sz - USERSTACK*PGSIZE, p->sz);
+  
+  // NEW - CHECK IF PAGE WAS SWAPPED OUT (ADD THIS FIRST)
+  int swap_slot = find_swapped_page(p, va);
+  if(swap_slot >= 0) {
+    // Page is in swap - reload it
+    printf("[pid %d] PAGEFAULT va=0x%lx access=%s cause=swap\n", 
+            p->pid, page_va, is_write ? "write" : "read");
+    
+    // Allocate memory for the page
+    if((mem = kalloc()) == 0) {
+  printf("[pid %d] MEMFULL\n", p->pid);
+#if USE_LRU
+  mem = evict_page_lru(p, pagetable);
+#else
+  mem = evict_page_fifo(p, pagetable);
+#endif
+  if(mem == 0) {
+    return -1;
+  }
+}
+    
+    // Read page from swap file
+    if(p->swapfile) {
+      p->swapfile->off = swap_slot * PGSIZE;
+      int bytes_read = fileread(p->swapfile, (uint64)mem, PGSIZE);
+      if(bytes_read != PGSIZE) {
+        printf("[pid %d] ERROR: swap read failed\n", p->pid);
+        kfree(mem);
+        return -1;
+      }
+    } else {
+      printf("[pid %d] ERROR: no swap file\n", p->pid);
+      kfree(mem);
+      return -1;
+    }
+    
+    // Free the swap slot
+    p->swap_slots[swap_slot] = 0;
+    p->num_swap_slots_used--;
+    
+    // Remove from swapped list
+    remove_swapped_page(p, page_va);
+    
+    printf("[pid %d] SWAPIN va=0x%lx slot=%d\n", p->pid, page_va, swap_slot);
+    
+    // Map the page
+    // Map the page as READ-ONLY initially (will upgrade on first write)
+if(mappages(pagetable, page_va, PGSIZE, (uint64)mem, PTE_R | PTE_U) < 0) {
+      kfree(mem);
+      return -1;
+    }
+    
+    printf("[pid %d] RESIDENT va=0x%lx seq=%d\n", p->pid, page_va, p->next_fifo_seq);
+    add_resident_page(p, page_va, p->next_fifo_seq);
+    p->next_fifo_seq++;
+    
+    if(p->next_fifo_seq >= 1000000) {
+      for(int i = 0; i < p->num_resident; i++) {
+        p->resident_pages[i].seq = i;
+      }
+      p->next_fifo_seq = p->num_resident;
+    }
+    
+    return (uint64)mem;
+  }
   
   // Check if address is valid - CHECK STACK FIRST
   if(va >= p->sz - USERSTACK*PGSIZE && va < p->sz) {
@@ -562,7 +828,11 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     
    if((mem = kalloc()) == 0) {
   printf("[pid %d] MEMFULL\n", p->pid);
+#if USE_LRU
+  mem = evict_page_lru(p, pagetable);
+#else
   mem = evict_page_fifo(p, pagetable);
+#endif
   if(mem == 0) {
     return -1;
   }
@@ -570,7 +840,8 @@ vmfault(pagetable_t pagetable, uint64 va, int is_write)
     memset(mem, 0, PGSIZE);
     
     // Map the page
-    if(mappages(pagetable, page_va, PGSIZE, (uint64)mem, PTE_R | PTE_W | PTE_U) < 0) {
+   // Map the page as READ-ONLY initially (will upgrade on first write)
+if(mappages(pagetable, page_va, PGSIZE, (uint64)mem, PTE_R | PTE_U) < 0) {
       kfree(mem);
       return -1;
     }
@@ -597,7 +868,11 @@ if(p->next_fifo_seq >= 1000000) {
     
   if((mem = kalloc()) == 0) {
   printf("[pid %d] MEMFULL\n", p->pid);
+#if USE_LRU
+  mem = evict_page_lru(p, pagetable);
+#else
   mem = evict_page_fifo(p, pagetable);
+#endif
   if(mem == 0) {
     return -1;
   }
@@ -647,12 +922,15 @@ if(p->next_fifo_seq >= 1000000) {
     
   if((mem = kalloc()) == 0) {
   printf("[pid %d] MEMFULL\n", p->pid);
+#if USE_LRU
+  mem = evict_page_lru(p, pagetable);
+#else
   mem = evict_page_fifo(p, pagetable);
+#endif
   if(mem == 0) {
     return -1;
   }
-}
-    memset(mem, 0, PGSIZE);  // Zero-fill first
+} memset(mem, 0, PGSIZE);  // Zero-fill first
     
     // Load actual program content from executable file
     if(p->exec_inode && p->data_file_size > 0) {
@@ -672,7 +950,8 @@ if(p->next_fifo_seq >= 1000000) {
     }
     
     // Map the page
-    if(mappages(pagetable, page_va, PGSIZE, (uint64)mem, PTE_R | PTE_W | PTE_U) < 0) {
+   // Map the page as READ-ONLY initially (will upgrade on first write)
+if(mappages(pagetable, page_va, PGSIZE, (uint64)mem, PTE_R | PTE_U) < 0) {
       kfree(mem);
       return -1;
     }
@@ -697,7 +976,11 @@ if(p->next_fifo_seq >= 1000000) {
     
 if((mem = kalloc()) == 0) {
   printf("[pid %d] MEMFULL\n", p->pid);
+#if USE_LRU
+  mem = evict_page_lru(p, pagetable);
+#else
   mem = evict_page_fifo(p, pagetable);
+#endif
   if(mem == 0) {
     return -1;
   }
@@ -705,7 +988,8 @@ if((mem = kalloc()) == 0) {
     memset(mem, 0, PGSIZE);
     
     // Map the page
-    if(mappages(pagetable, page_va, PGSIZE, (uint64)mem, PTE_R | PTE_W | PTE_U) < 0) {
+   // Map the page as READ-ONLY initially (will upgrade on first write)
+if(mappages(pagetable, page_va, PGSIZE, (uint64)mem, PTE_R | PTE_U) < 0) {
       kfree(mem);
       return -1;
     }
@@ -732,3 +1016,7 @@ if(p->next_fifo_seq >= 1000000) {
     return -1;
   }
 }
+
+
+
+/* ############## LLM Generated Code Ends ################ */

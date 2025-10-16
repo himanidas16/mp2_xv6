@@ -13,3 +13,4 @@
 #define MAXPATH      128   // maximum file path name
 #define USERSTACK    1     // user stack pages
 
+#define USE_LRU       0  // ADD THIS LINE: 0 = FIFO, 1 = LRU

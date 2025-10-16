@@ -46,3 +46,191 @@ You will need a RISC-V "newlib" tool chain from
 https://github.com/riscv/riscv-gnu-toolchain, and qemu compiled for
 riscv64-softmmu.  Once they are installed, and in your shell
 search path, you can run "make qemu".
+
+
+
+# xv6 Virtual Memory Management 
+
+## Project Overview
+
+This project implements a complete virtual memory management system for xv6, transforming it from eager (upfront) memory allocation to lazy (on-demand) allocation with swapping support.
+
+
+
+## Features Implemented
+
+### 1. Demand Paging (40 Marks)
+
+- **Lazy Allocation**: Pages are not allocated during `exec()` or `sbrk()`.
+- **On-Demand Loading**: Pages are loaded only when accessed (page fault).
+- **Text/Data Loading**: Program code and data are loaded from the executable on first access.
+- **Heap/Stack Allocation**: Zero-filled pages are allocated on first access.
+- **Invalid Access Detection**: Processes are terminated cleanly when accessing invalid memory.
+
+---
+
+### 2. FIFO Page Replacement (30 Marks)
+
+- **Per-Process Resident Set**: Each process tracks its own resident pages.
+- **FIFO Policy**: The oldest page (lowest sequence number) is evicted first.
+- **Process Isolation**: Pages are only evicted from the process they belong to.
+- **Sequence Wraparound**: Handles overflow when the sequence number exceeds 1,000,000.
+
+---
+
+### 3. Swapping (35 Marks)
+
+- **Per-Process Swap Files**: Each process uses a unique swap file `/pgswpXXXXX`.
+- **Clean Page Discard**: Read-only pages are discarded without disk I/O.
+- **Dirty Page Write**: Modified pages are written to the swap file.
+- **Swap-In/Out**: Pages are moved between memory and disk as needed.
+- **Slot Management**: Tracks 1024 slots per process (4 MB capacity).
+- **Swap Full Handling**: Process is terminated if swap capacity is exhausted.
+
+---
+
+### 4. Dirty Bit Tracking
+
+- **Software Tracking**: Pages are initially mapped as read-only.
+- **Write Fault Detection**: First write triggers a fault, marking the page as dirty.
+- **Permission Upgrade**: Read-only pages are upgraded to read-write on first write.
+
+---
+
+### 5. System State Inspection (5 Marks)
+
+- **`memstat()` System Call**: Reports memory state of the calling process.
+- **Truthful Bookkeeping**: Report reflects the actual kernel state.
+- **Page States**: Each page is reported as `UNMAPPED`, `RESIDENT`, or `SWAPPED`.
+
+---
+
+## Bonus: LRU Page Replacement (15 Marks)
+
+### Algorithm Description
+
+Implements an approximation of Least Recently Used (LRU) as an alternative to FIFO. Instead of evicting the oldest page, it evicts the one that hasn't been accessed for the longest time.
+
+#### How It Works
+
+- On page load: `last_used_seq = current sequence`
+- On write access: `last_used_seq = current sequence` (updated)
+- On eviction: Select page with the minimum `last_used_seq`
+
+### Design Rationale
+
+#### Why LRU over FIFO?
+
+- **Temporal Locality**: Programs often reuse recently accessed pages.
+- **Better Hit Rate**: Recently used pages are more likely to be accessed again.
+- **Hot Page Protection**: Keeps frequently used pages in memory longer.
+
+#### Trade-offs
+
+- **Pros**: Better performance for workloads with temporal locality.
+- **Cons**: Slight overhead due to updating `last_used_seq` on each write.
+
+---
+
+## Implementation Details
+
+### Data Structure
+
+```c
+struct resident_page {
+    uint64 va;
+    int seq;              // FIFO sequence (when loaded)
+    int last_used_seq;    // LRU sequence (last access)
+    int is_dirty;
+    int swap_slot;
+};
+````
+
+### Victim Selection
+
+* **FIFO**: Select page with minimum `seq`.
+* **LRU**: Select page with minimum `last_used_seq`.
+
+### Configuration
+
+Edit in `kernel/param.h`:
+
+```c
+#define USE_LRU  0  // 0 = FIFO, 1 = LRU
+```
+
+---
+
+## Logging
+
+Log entries follow a consistent format:
+
+* **Initialization**: `INIT-LAZYMAP`
+* **Page Faults**: `PAGEFAULT`, `ALLOC`, `LOADEXEC`, `RESIDENT`
+* **Eviction**: `MEMFULL`, `VICTIM`, `EVICT`, `DISCARD` / `SWAPOUT`
+* **Cleanup**: `SWAPCLEANUP`
+
+Examples:
+
+```text
+[pid 3] VICTIM va=0x400000 seq=123 algo=FIFO
+[pid 3] VICTIM va=0x400000 seq=123 algo=LRU
+```
+
+---
+
+## Usage
+
+### Compilation
+
+```bash
+make qemu
+```
+
+### Testing `memstat()`
+
+```bash
+$ memtest
+```
+
+### Switching Page Replacement Algorithm
+
+Edit `kernel/param.h`:
+
+```c
+#define USE_LRU  0  // FIFO (default)
+#define USE_LRU  1  // LRU (bonus)
+```
+
+Recompile after editing.
+
+---
+
+## Codebase Changes
+
+### Modified Files
+
+* `kernel/proc.h` – Process structure with memory tracking
+* `kernel/proc.c` – Process initialization and cleanup
+* `kernel/exec.c` – Lazy loading, swap file creation
+* `kernel/vm.c` – Page fault handling, eviction, swap I/O
+* `kernel/trap.c` – Write fault detection
+* `kernel/sysproc.c` – `memstat()` system call
+* `kernel/param.h` – LRU configuration flag
+
+### New Files
+
+* `kernel/memstat.h` – Memory statistics data structures
+* `user/memtest.c` – User-space test program for `memstat()`
+
+---
+
+## Key Design Decisions
+
+* **Dirty Bit Tracking**: Trap-on-first-write strategy with read-only initial mappings.
+* **Swap File Format**: Per-process files named using PID (`/pgswpXXXXX`).
+* **Slot Management**: 1024-slot bitmap-based tracking for swap space.
+* **LRU Approximation**: Updates `last_used_seq` only on writes (not reads) to reduce overhead.
+
+---
+

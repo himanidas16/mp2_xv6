@@ -93,6 +93,9 @@ enum procstate
   RUNNING,
   ZOMBIE
 };
+
+
+// llm generated code starts here 
 #define MAX_RESIDENT_PAGES 64
 // Per-process state
 struct proc
@@ -132,14 +135,30 @@ struct proc
   uint64 data_file_size;   // How much data to read
 
   // NEW: Page replacement tracking
-
   struct resident_page
-  {
-    uint64 va;    // Virtual address of the page
-    int seq;      // FIFO sequence number
-    int is_dirty; // Is the page dirty (modified)?
-  } resident_pages[MAX_RESIDENT_PAGES];
+{
+    uint64 va;
+    int seq;
+    int is_dirty;
+    int swap_slot;
+    int last_used_seq;  // ADD THIS LINE
+} resident_pages[MAX_RESIDENT_PAGES];
+
   int num_resident; // Number of resident pages
+  
+  struct swapped_page {
+  uint64 va;        // Virtual address
+  int swap_slot;    // Which slot in swap file
+} swapped_pages[MAX_RESIDENT_PAGES];
+int num_swapped;    // Count of swapped pages
 
 
+  // NEW: Swap file management
+  struct file *swapfile;      // Pointer to this process's swap file
+  char swap_filename[20];     // Filename like "/pgswp00003"
+  int swap_slots[1024];       // Track used slots: 0=free, 1=used
+  int num_swap_slots_used;    // Count of used slots
+
+  
 };
+// llm generated code ends here

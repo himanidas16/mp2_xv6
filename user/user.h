@@ -47,3 +47,8 @@ void printf(const char*, ...) __attribute__ ((format (printf, 1, 2)));
 // umalloc.c
 void* malloc(uint);
 void free(void*);
+
+/* ############## LLM Generated Code Begins ############## */
+struct proc_mem_stat;  // Forward declaration
+int memstat(struct proc_mem_stat*);  
+/* ############## LLM Generated Code Ends ################ */
